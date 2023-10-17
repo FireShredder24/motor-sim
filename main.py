@@ -31,7 +31,7 @@ class PressureCase:
          self.Py = 2 * sy * s / od # ksi, yield pressure
          self.Pa = self.Py / PressureCase.CASE_PRESSURE_SAFE_FACTOR # ksi, case allowable pressure
 
-    def insulate(self, in_s: longdouble, in_td: longdouble, in_dr: longdouble, in_rho: longdouble, in_k: longdouble, in_cp: longdouble):
+    def insulate(self, in_s: float, in_td: float, in_dr: float, in_rho: float, in_k: float, in_cp: float):
          self.in_s = in_s # in, thickness of insulation
          self.in_td = in_td # degrees F, insulation decomposition temperature
          self.in_dr = in_dr # in / (s * deg F) insulation decomposition rate
@@ -43,31 +43,40 @@ class TempMatrixElement:
     def __init__(self, di, od, lg, rho, Te, s):
         self.mass = pi * ((od/2) ** 2 - (di / 2) ** 2) * rho
         self.Te = float(Te)
+        self.rho = rho
+        self.di = di
+        self.od = od
+        self.lg = lg
         self.ao = 2 * pi * od / 2 * lg
         self.ai = 2 * pi * di / 2 * lg
         self.s = s
+
+    def erode(self, Td, dr, dt):
+        if self.Te - Td > 0 and self.s > 0:
+            self.s -= (self.Te - Td) * dr * dt if self.s-(self.Te-Td)*dr > 0 else self.s
+            self.mass = pi * ((self.od / 2) ** 2 - (self.od - self.s)**2) * self.lg * self.rho
+            self.ai = 2 * pi * (self.od - self.s*2) / 2 * self.lg
+
 
 def tempFlow(ki, s, A, dTi, cp, mass):
     return longdouble(ki/s*A*dTi/(cp*mass))
 
 case = PressureCase(36, 0.049, 1.5, 7.3, 900, 2.83e-1, 31.2, 1.17e-1)
-case.insulate(0.010, 300, 1e-5, 0.0361, 0.5779e-1, 2.38e-4)
+case.insulate(0.010, 300, 1e-15, 0.0361, 0.5779e-8, 2.38e-4)
 
 def heatFlowSim():
     t = 0
     dt = longdouble(1e-5)
     T = 90 # deg F, ambient temperature
     ds = longdouble(2e-3) # diameter step
-    Tc = 4000 # deg F, chamber temperature
+    Tc = 2900 # deg F, chamber temperature
 
     Tmax = T # maximum temperature within the array
 
-    if not case.in_s:
-        k_flow = longdouble(3.397e-7) # BTU / (in * s * deg F) Convection heat transfer coefficient b/w fluid and casing/insulation
-    else:
-        k_flow = longdouble(0.7*0.5779/3600/12) # BTU / (in * s * deg F) Heat transfer coefficient through insulation
+    k_flow = longdouble(3.397e-7) # BTU / (in * s * deg F) Convection heat transfer coefficient b/w fluid and casing/insulation
 
     elements = []
+    insulation = None
     for idx, i in enumerate(arange(case.id, case.od, ds)):
         elements.append(TempMatrixElement(i, i+ds, case.lg, case.rho, T, idx*ds))
     if case.in_s:
@@ -75,13 +84,17 @@ def heatFlowSim():
 
     print(f"# of elements: {len(elements)}")
 
-    tgraph = graph(title="Maximum temperature", xtitle="t", ytitle="T (deg F)", fast=True)
-    max_curve = gcurve(label="Tmax", color=color.red)
+    tgraph = graph(title="Maximum temperature", xtitle="t", ytitle="T (deg F)", fast=False)
+    max_curve = gcurve(label="Tmax", color=color.red, markers=True)
 
-    sgraph = graph(title="Slice temperature", xtitle="s", ytitle="T (deg F)", fast=False)
+    sgraph = graph(title="Slice temperature", xtitle="inches from inside of casing", ytitle="T (deg F)", fast=False)
     scurve = gcurve(label="T at s", color=color.red)
     ic = gcurve(label="initial T at s", color=color.blue)
     fcurve = gcurve(label="final T at s", color=color.green)
+
+    insgraph = graph(title="Insulation properties", xtitle="t", ytitle="T deg F, s in", fast=False)
+    ins_s_curve = gcurve(label="Insulation thickness", color=color.blue)
+    ins_T_curve = gcurve(label="Insulation temperature", color=color.red)
 
     max_idx = 0
     for idx, i in enumerate(elements):
@@ -90,6 +103,9 @@ def heatFlowSim():
 
     rt_0 = time.perf_counter()
     while elements[0].Te <= case.ta and t <= 1:
+        disp = False
+        if fmod(t,0.01) < 2*dt:
+            disp = True
         for idx, i in enumerate(elements):
             if idx == 0 and not insulation: # innermost element receives heat from combustion gasses or the insulation, not a previous element
                 k = longdouble(k_flow)
@@ -97,10 +113,24 @@ def heatFlowSim():
                 Td = longdouble(i.Te) # low temperature
                 i.Te += tempFlow(k, ds, i.ai, Tr - Td, case.cp, i.mass) * dt
             elif idx == 0 and insulation:
-                k = longdouble(case.in_k)
-                Tr = longdouble(Tc)
-                Td = longdouble(i.Te)
-                i.Te += tempFlow(k, case.in_s, case.ai, Tr - Td, case.in_cp, insulation.mass) * dt
+                insulation.erode(case.in_td, case.in_dr, dt)
+                if disp:
+                    ins_s_curve.plot(t, insulation.s)
+                if insulation.s > 0:
+                    insulation.Te += tempFlow(k_flow + case.in_k / 2, insulation.s, insulation.ai, Tc - insulation.Te, case.in_cp, insulation.mass)
+                    if disp:
+                        ins_T_curve.plot(t, insulation.Te)
+                    k = longdouble(case.in_k)
+                    Tr = longdouble(Tc)
+                    Td = longdouble(i.Te)
+                    dT = tempFlow(k, insulation.s, case.ai, Tr - Td, case.in_cp, insulation.mass) * dt
+                    insulation.Te -= dT
+                    i.Te += dT
+                else:
+                    k = longdouble(k_flow)
+                    Tr = longdouble(Tc)  # high temperature
+                    Td = longdouble(i.Te)  # low temperature
+                    i.Te += tempFlow(k, ds, i.ai, Tr - Td, case.cp, i.mass) * dt
             elif idx == max_idx: # outermost element pushes heat to the outside as well as receiving heat from within
                 k = longdouble(case.k)
                 Tr = longdouble(elements[idx - 1].Te)
@@ -117,7 +147,8 @@ def heatFlowSim():
                 dT = tempFlow(k, ds, i.ai, Tr - Td, case.cp, i.mass) * dt
                 i.Te += dT
                 elements[idx-1].Te -= dT
-        #max_curve.plot(t, elements[0].Te)
+        if disp:
+            max_curve.plot(t, elements[0].Te)
         print(f"t={t:.6f}, Tmax={elements[0].Te:.3f}, realtime={time.perf_counter()-rt_0:.2f}")
         t+=dt
 
