@@ -41,15 +41,15 @@ class PressureCase:
 
 class TempMatrixElement:
     def __init__(self, inner_radius, outer_radius, length, density, temperature, thickness):
-        self.mass = pi * (outer_radius**2 - inner_radius**2) * length * density
-        self.temperature = float(temperature)
-        self.density = density
-        self.inner_radius = inner_radius
-        self.outer_radius = outer_radius
-        self.length = length
-        self.outer_area = 2 * pi * outer_radius * length
-        self.inner_area = 2 * pi * inner_radius * length
-        self.thickness = thickness
+        self.mass = pi * (outer_radius**2 - inner_radius**2) * length * density # lbm
+        self.temperature = float(temperature) # R
+        self.density = density # lbm / in^3
+        self.inner_radius = inner_radius # in
+        self.outer_radius = outer_radius # in
+        self.length = length # in
+        self.outer_area = 2 * pi * outer_radius * length # in^2
+        self.inner_area = 2 * pi * inner_radius * length # in^2
+        self.thickness = thickness # in
 
     def erode(self, Td, dr, dt):
         if self.temperature - Td > 0 and self.thickness > 0:
@@ -65,15 +65,17 @@ def conductiveHeatTransfer(heat_transfer_coefficient, thickness, area, temperatu
 def convectiveHeatTransfer(heat_transfer_coefficient, area, temperature_difference, specific_heat, mass):
     return longdouble(heat_transfer_coefficient * area * temperature_difference / (specific_heat * mass))
 
-case = PressureCase(36, 0.049, 1.5, 7.3, 1000 + 459.7, 2.83e-1, 23.116, 1.17e-1)
-case.insulate(0.025, 300 + 459.7, 7e-6, 0.0361, 1, 2.38e-4)
+steel_sugar_case = dict(yield_strength=36, thickness=0.049, outer_radius=1.5, length=7.3, T_allowable=1000+459.7, density=0.283, thermal_conductivity_btu_hr_ft=23.116, specific_heat=0.117)
+case = PressureCase(**steel_sugar_case)
+test_insulation = dict(insulation_thickness=0.025, insulation_decomposition_temp=300+459.7, insulation_decomposition_rate=7e-6, insulation_density=0.0361, insulation_thermal_conductivity=1, insulation_specific_heat=2.38e-4)
+case.insulate(**test_insulation)
 
 def heatFlowSim():
     t = 0
     dt = longdouble(1e-5)
-    T = 9/5*20 + 32 + 459.7# Rankine, ambient temperature
+    T = 525 # Rankine, ambient temperature
     ds = longdouble(1e-3) # diameter step
-    Tc = 1450*9/5 + 32 + 459.7 # Rankine, chamber temperature
+    Tc = 1450*9/5+32+459.7 # Rankine, chamber temperature.  This value of 1450 degrees Celcius corresponds to the adiabatic flame temperature of 65/35 KNO3/sucrose "rocket candy".
 
     Tmax = T # maximum temperature within the array
 
@@ -88,16 +90,16 @@ def heatFlowSim():
 
     print(f"# of elements: {len(elements)}")
 
-    tgraph = graph(title="Maximum temperature", xtitle="t", ytitle="T (deg F)", fast=True)
+    tgraph = graph(title="Maximum temperature", xtitle="t", ytitle="T (Rankine)", fast=True)
     max_temp_curve = gcurve(label="Max casing temperature", color=color.red)
     insulation_temp_curve = gcurve(label="Insulation temperature", color=color.green)
 
-    section_graph = graph(title="Slice temperature", xtitle="inches from inside of casing", ytitle="T (deg F)", fast=False)
+    section_graph = graph(title="Slice temperature", xtitle="inches from inside of casing", ytitle="T (Rankine)", fast=False)
     slice_temperature_curve = gcurve(label="T at thickness", color=color.red)
     initial_temperature_curve = gcurve(label="initial T at thickness", color=color.blue)
     final_temperature_curve = gcurve(label="final T at thickness", color=color.green)
 
-    insgraph = graph(title="Insulation properties", xtitle="t", ytitle="T deg F, thickness in", fast=True)
+    insgraph = graph(title="Insulation thickness", xtitle="t", ytitle="in", fast=True)
     ins_s_curve = gcurve(label="Insulation thickness", color=color.blue)
 
     max_idx = 0
