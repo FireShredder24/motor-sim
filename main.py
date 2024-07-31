@@ -1,5 +1,9 @@
 from numpy import longdouble, pi, arange, fmod
 import time
+import matplotlib.pyplot as plt
+import numpy as np
+
+from matplotlib import cm
 
 from vpython import graph, gcurve, color
 
@@ -15,7 +19,7 @@ class PressureCase:
     CASE_PRESSURE_SAFE_FACTOR = 3
     PIN_PRESSURE_SAFE_FACTOR = 3
 
-    def __init__(self, yield_strength: float, thickness: float, outer_radius: float, length: float, T_allowable: float, density: float, thermal_conductivity_btu_hr_ft: float, specific_heat: float):
+    def __init__(self, yield_strength: float, thickness: float, outer_radius: float, length: float, T_allowable: float, density: float, thermal_conductivity: float, specific_heat: float):
          self.T_allowable = T_allowable # deg F, case allowable temperature
          self.yield_strength = yield_strength # ksi, yield strength
          self.thickness = thickness # in, case thickness
@@ -24,9 +28,8 @@ class PressureCase:
          self.length = length # pressure case length
          self.density = density # lb / in^3, case density
          self.mass = density * pi * (self.outer_radius**2 - self.inner_radius**2) * self.length # lb, case mass
-         self.thermal_conductivity_btu_hr_ft = thermal_conductivity_btu_hr_ft # BTU / (hr * deg F * ft) thermal conductivity
-         self.thermal_conductivity = thermal_conductivity_btu_hr_ft * 1 / 3600 * 1 / 12 # BTU / (thickness * deg F * in) thermal conductivity
-         self.specific_heat = specific_heat # BTU / (lb * deg F) specific heat capacity
+         self.thermal_conductivity = thermal_conductivity # BTU / in / s thermal conductivity
+         self.specific_heat = specific_heat # BTU / lbm / R specific heat capacity
          self.inner_area = 2 * pi * self.inner_radius * self.length # in^2, internal area
          self.yield_pressure = 2 * yield_strength * thickness / (outer_radius*2) # ksi, yield pressure
          self.allowable_pressure = self.yield_pressure / PressureCase.CASE_PRESSURE_SAFE_FACTOR # ksi, case allowable pressure
@@ -40,7 +43,7 @@ class PressureCase:
          self.insulation_specific_heat = insulation_specific_heat # BTU / (lb * deg F) insulation specific heat capacity
 
 class TempMatrixElement:
-    def __init__(self, inner_radius, outer_radius, length, density, temperature, thickness):
+    def __init__(self, inner_radius, outer_radius, length, density, temperature, thickness, specific_heat, conduction_htc):
         self.mass = pi * (outer_radius**2 - inner_radius**2) * length * density # lbm
         self.temperature = float(temperature) # R
         self.density = density # lbm / in^3
@@ -50,6 +53,8 @@ class TempMatrixElement:
         self.outer_area = 2 * pi * outer_radius * length # in^2
         self.inner_area = 2 * pi * inner_radius * length # in^2
         self.thickness = thickness # in
+        self.specific_heat = specific_heat # BTU / R lbm
+        self.conduction_htc = conduction_htc # Conductive heat transfer coefficient
 
     def erode(self, Td, dr, dt):
         if self.temperature - Td > 0 and self.thickness > 0:
@@ -59,22 +64,25 @@ class TempMatrixElement:
             self.mass = pi * (self.outer_radius**2 - (self.outer_radius - self.thickness)**2) * self.length * self.density
             self.inner_area = 2 * pi * (self.outer_radius - self.thickness) / 2 * self.length
 
-def conductiveHeatTransfer(heat_transfer_coefficient, thickness, area, temperature_difference, specific_heat, mass):
-    return longdouble(heat_transfer_coefficient / thickness * area * temperature_difference / (specific_heat * mass) )
+    def conductiveHeatTransfer(self, temperature_difference, dt):
+        print(f"dT = {temperature_difference}, thick = {self.thickness}, specific_heat = {self.specific_heat}, mass = {self.mass}")
+        dT = longdouble(self.conduction_htc / self.thickness * self.inner_area * temperature_difference / (self.specific_heat * self.mass) )
+        self.temperature += dT * dt
+        return dT * dt
 
 def convectiveHeatTransfer(heat_transfer_coefficient, area, temperature_difference, specific_heat, mass):
-    return longdouble(heat_transfer_coefficient * area * temperature_difference / (specific_heat * mass))
+        return longdouble(heat_transfer_coefficient * area * temperature_difference / (specific_heat * mass))
 
-steel_sugar_case = dict(yield_strength=36, thickness=0.049, outer_radius=1.5, length=7.3, T_allowable=1000+459.7, density=0.283, thermal_conductivity_btu_hr_ft=23.116, specific_heat=0.117)
+steel_sugar_case = dict(yield_strength=36, thickness=0.049, outer_radius=1.5, length=7.3, T_allowable=1000+459.7, density=0.283, thermal_conductivity=50/12/3600, specific_heat=0.117)
 case = PressureCase(**steel_sugar_case)
-test_insulation = dict(insulation_thickness=0.025, insulation_decomposition_temp=300+459.7, insulation_decomposition_rate=7e-6, insulation_density=0.0361, insulation_thermal_conductivity=1, insulation_specific_heat=2.38e-4)
+test_insulation = dict(insulation_thickness=0.025, insulation_decomposition_temp=300+459.7, insulation_decomposition_rate=7e-6, insulation_density=0.0361, insulation_thermal_conductivity=0.144/12/3600, insulation_specific_heat=2.38e-4)
 case.insulate(**test_insulation)
 
 def heatFlowSim():
     t = 0
-    dt = longdouble(1e-5)
+    dt = longdouble(1e-4)
     T = 525 # Rankine, ambient temperature
-    ds = longdouble(1e-3) # diameter step
+    ds = longdouble(3e-3) # diameter step
     Tc = 1450*9/5+32+459.7 # Rankine, chamber temperature.  This value of 1450 degrees Celcius corresponds to the adiabatic flame temperature of 65/35 KNO3/sucrose "rocket candy".
 
     Tmax = T # maximum temperature within the array
@@ -84,9 +92,9 @@ def heatFlowSim():
     elements = []
     insulation = None
     for idx, i in enumerate(arange(case.inner_radius, case.outer_radius, ds)):
-        elements.append(TempMatrixElement(i, i+ds, case.length, case.density, T, idx*ds))
+        elements.append(TempMatrixElement(i, i+ds, case.length, case.density, T, ds, case.specific_heat, case.thermal_conductivity))
     if case.insulation_thickness:
-        insulation = TempMatrixElement(case.inner_radius - case.insulation_thickness, case.inner_radius, case.length, case.insulation_density, T, case.insulation_thickness)
+        insulation = TempMatrixElement(case.inner_radius - case.insulation_thickness, case.inner_radius, case.length, case.insulation_density, T, case.insulation_thickness, case.insulation_specific_heat, case.insulation_thermal_conductivity)
 
     print(f"# of elements: {len(elements)}")
 
@@ -102,6 +110,10 @@ def heatFlowSim():
     insgraph = graph(title="Insulation thickness", xtitle="t", ytitle="in", fast=True)
     ins_s_curve = gcurve(label="Insulation thickness", color=color.blue)
 
+    temp_record_z = []
+    thick_record_x = []
+    time_record_y = []
+
     max_idx = 0
     for idx, i in enumerate(elements):
         initial_temperature_curve.plot(i.thickness, i.temperature)
@@ -114,29 +126,24 @@ def heatFlowSim():
             disp = True
         for idx, i in enumerate(elements):
             if 0 < idx < max_idx:
-                thermal_conductivity = longdouble(case.thermal_conductivity)
                 Tr = longdouble(elements[idx - 1].temperature)
                 Td = longdouble(i.temperature)
-                dT = conductiveHeatTransfer(thermal_conductivity, ds, i.inner_area, Tr - Td, case.specific_heat, i.mass) * dt
-                i.temperature += dT
+                dT = i.conductiveHeatTransfer(Tr - Td, dt)
                 elements[idx-1].temperature -= dT
             elif idx == 0 and not insulation: # innermost element receives heat from combustion gasses or the insulation, not a previous element
-                thermal_conductivity = longdouble(convective_heat_transfer_coefficient)
                 Tr = longdouble(Tc) # high temperature
                 Td = longdouble(i.temperature) # low temperature
-                i.temperature += conductiveHeatTransfer(thermal_conductivity, ds, i.inner_area, Tr - Td, case.specific_heat, i.mass) * dt
+                i.conductiveHeatTransfer(Tr - Td, dt)
             elif idx == 0:
                 insulation.erode(case.insulation_decomposition_temp, case.insulation_decomposition_rate, dt)
                 if disp:
                     ins_s_curve.plot(t, insulation.thickness)
                 if insulation.thickness > 0:
-                    insulation.temperature += convectiveHeatTransfer(case.insulation_thermal_conductivity, insulation.inner_area, Tc - insulation.temperature, case.insulation_specific_heat, insulation.mass)
+                    insulation.temperature += convectiveHeatTransfer(convective_heat_transfer_coefficient, insulation.inner_area, Tc - insulation.temperature, case.insulation_specific_heat, insulation.mass)
                     if disp:
                         insulation_temp_curve.plot(t, insulation.temperature)
-                    thermal_conductivity = longdouble(case.insulation_thermal_conductivity)
-                    dT = conductiveHeatTransfer(thermal_conductivity, insulation.thickness, case.inner_area, Tc - i.temperature, case.insulation_specific_heat, insulation.mass) * dt
+                    dT = i.conductiveHeatTransfer(insulation.temperature - i.temperature, dt)
                     insulation.temperature -= dT
-                    i.temperature += dT
                 else:
                     # If insulation has been eroded away, heat transfers from convection
                     i.temperature += convectiveHeatTransfer(convective_heat_transfer_coefficient, i.inner_area, Tc - i.temperature, case.specific_heat, i.mass) * dt
@@ -144,11 +151,13 @@ def heatFlowSim():
                 thermal_conductivity = longdouble(case.thermal_conductivity)
                 Tr = longdouble(elements[idx - 1].temperature)
                 Td = longdouble(i.temperature)
-                i.temperature += conductiveHeatTransfer(thermal_conductivity, ds, i.inner_area, elements[idx - 1].temperature - i.temperature, case.specific_heat, i.mass) * dt # heat gained from previous slice
-                thermal_conductivity = longdouble(case.thermal_conductivity * 1e-3)
+                i.conductiveHeatTransfer(elements[idx - 1].temperature - i.temperature, dt) * dt # heat gained from previous slice
                 Tr = longdouble(i.temperature)
                 Td = longdouble(T)
-                i.temperature -= conductiveHeatTransfer(thermal_conductivity, ds, i.outer_area, Tr - Td, case.specific_heat, i.mass) * dt # heat lost to surroundings
+                i.conductiveHeatTransfer(Tr - Td, dt) # heat lost to surroundings
+            temp_record_z.append(i.temperature)
+            thick_record_x.append(i.inner_radius)
+            time_record_y.append(t)
         if disp:
             max_temp_curve.plot(t, elements[0].temperature)
         print(f"t={t:.6f}, Tmax={elements[0].temperature:.3f}, realtime={time.perf_counter()-rt_0:.2f}")
@@ -157,6 +166,18 @@ def heatFlowSim():
     for idx, i in enumerate(elements):
         final_temperature_curve.plot(i.thickness, i.temperature)
     # Termination of heat flow simulation
+
+    thick_record_x = np.matrix(thick_record_x)
+    print(thick_record_x)
+    time_record_y = np.matrix(time_record_y)
+    print(time_record_y)
+    fig, ax = plt.subplots(subplot_kw={"projection":"3d"})
+    temp_record_z = np.matrix(temp_record_z)
+    print(temp_record_z)
+    plt.style.use('_mpl-gallery')
+    ax.plot_surface(thick_record_x, time_record_y, temp_record_z, norm=False)
+    ax.set(xticklabels=[],yticklabels=[],zticklabels=[])
+    plt.show()
 
 def main():
     heatFlowSim()
